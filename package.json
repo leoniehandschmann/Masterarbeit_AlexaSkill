@@ -1,0 +1,17 @@
+{
+  "name": "lern-buddy",
+  "version": "1.0.0",
+  "description": "Alexa Skill",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"no tests\""
+  },
+  "author": "Leonie",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "ask-sdk-core": "^2.12.1",
+    "ask-sdk-model": "^1.55.0",
+    "ask-sdk-dynamodb-persistence-adapter": "^2.12.1",
+    "sync-request": "^6.1.0"
+  }
+}

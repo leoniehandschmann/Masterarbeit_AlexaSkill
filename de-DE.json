@@ -1,0 +1,297 @@
+{
+  "interactionModel": {
+    "dialog": {
+      "intents": [
+        {
+          "slots": [
+            {
+              "name": "catchAll",
+              "elicitationRequired": true,
+              "type": "AMAZON.SearchQuery",
+              "confirmationRequired": false,
+              "prompts": {
+                "elicitation": "Elicit.Slot.1582418329027.699764013019"
+              }
+            }
+          ],
+          "name": "GPTIntent",
+          "confirmationRequired": false,
+          "prompts": {}
+        },
+        {
+          "slots": [
+            {
+              "name": "learn_time",
+              "elicitationRequired": true,
+              "type": "learn_time",
+              "confirmationRequired": false,
+              "prompts": {
+                "elicitation": "Elicit.Slot.472887725914.724046857356"
+              }
+            }
+          ],
+          "name": "ChooseLearnTimeIntent",
+          "confirmationRequired": false,
+          "prompts": {}
+        },
+        {
+          "slots": [
+            {
+              "name": "answerOption",
+              "elicitationRequired": true,
+              "type": "AMAZON.NUMBER",
+              "confirmationRequired": false,
+              "prompts": {
+                "elicitation": "Elicit.Slot.1173148136674.315341270407"
+              }
+            },
+            {
+              "name": "freeAnswer",
+              "elicitationRequired": true,
+              "type": "AMAZON.SearchQuery",
+              "confirmationRequired": false,
+              "prompts": {
+                "elicitation": "Elicit.Slot.1173148136674.329551925808"
+              }
+            }
+          ],
+          "name": "AnswerCheckIntent",
+          "confirmationRequired": false,
+          "prompts": {}
+        }
+      ],
+      "delegationStrategy": "ALWAYS"
+    },
+    "languageModel": {
+      "intents": [
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "slots": [
+            {
+              "name": "catchAll",
+              "type": "AMAZON.SearchQuery",
+              "samples": [
+                "{catchAll}"
+              ]
+            }
+          ],
+          "name": "GPTIntent",
+          "samples": [
+            "hallo",
+            "wie geht\u0027s dir",
+            "sag hallo welt",
+            "sag hallo"
+          ]
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        },
+        {
+          "slots": [
+            {
+              "name": "learn_time",
+              "type": "learn_time",
+              "samples": [
+                "{learn_time}"
+              ]
+            }
+          ],
+          "name": "ChooseLearnTimeIntent",
+          "samples": [
+            "nur {learn_time}",
+            "ich will {learn_time} lernen",
+            "ich möchte {learn_time} lange lernen",
+            "{learn_time}"
+          ]
+        },
+        {
+          "slots": [
+            {
+              "name": "learn_topic",
+              "type": "learn_topic"
+            }
+          ],
+          "name": "ChooseTopicIntent",
+          "samples": [
+            "{learn_topic}"
+          ]
+        },
+        {
+          "slots": [],
+          "name": "TellStoryIntent",
+          "samples": [
+            "okay",
+            "auf gehts",
+            "legen wir los",
+            "lass uns beginnen",
+            "start"
+          ]
+        },
+        {
+          "slots": [],
+          "name": "AskQuestionsIntent",
+          "samples": [
+            "quiz",
+            "beginne das quiz",
+            "starte das quiz",
+            "frag mich",
+            "frag mich ab"
+          ]
+        },
+        {
+          "slots": [
+            {
+              "name": "answerOption",
+              "type": "AMAZON.NUMBER",
+              "samples": [
+                "{answerOption}"
+              ]
+            },
+            {
+              "name": "freeAnswer",
+              "type": "AMAZON.SearchQuery",
+              "samples": [
+                "{freeAnswer} "
+              ]
+            }
+          ],
+          "name": "AnswerCheckIntent",
+          "samples": [
+            "es ist {freeAnswer}",
+            "die richtige antwort ist {freeAnswer}",
+            "option {answerOption}",
+            "antwort {answerOption}",
+            "{answerOption}"
+          ]
+        }
+      ],
+      "types": [
+        {
+          "values": [
+            {
+              "name": {
+                "synonyms": [
+                  "12 minuten",
+                  "etwas länger"
+                ],
+                "value": "lang"
+              }
+            },
+            {
+              "name": {
+                "synonyms": [
+                  "8 minuten",
+                  "mir egal",
+                  "ich weiß es nicht",
+                  "durschnittlich lange",
+                  "durchschnitt"
+                ],
+                "value": "mittel"
+              }
+            },
+            {
+              "name": {
+                "synonyms": [
+                  "nicht lange",
+                  "5 minuten"
+                ],
+                "value": "kurz"
+              }
+            }
+          ],
+          "name": "learn_time"
+        },
+        {
+          "values": [
+            {
+              "name": {
+                "value": "wissenschaft"
+              }
+            },
+            {
+              "name": {
+                "value": "politik"
+              }
+            },
+            {
+              "name": {
+                "value": "geografie"
+              }
+            },
+            {
+              "name": {
+                "value": "sprache"
+              }
+            },
+            {
+              "name": {
+                "value": "kunst"
+              }
+            },
+            {
+              "name": {
+                "value": "geschichte"
+              }
+            }
+          ],
+          "name": "learn_topic"
+        }
+      ],
+      "invocationName": "masterarbeit demo"
+    },
+    "prompts": [
+      {
+        "variations": [
+          {
+            "type": "PlainText",
+            "value": "Wie kann ich dir helfen?"
+          }
+        ],
+        "id": "Elicit.Slot.1582418329027.699764013019"
+      },
+      {
+        "variations": [
+          {
+            "type": "PlainText",
+            "value": "Wie lange möchtest du lernen?"
+          }
+        ],
+        "id": "Elicit.Slot.472887725914.724046857356"
+      },
+      {
+        "variations": [
+          {
+            "type": "PlainText",
+            "value": "was ist die richtige antwort?"
+          }
+        ],
+        "id": "Elicit.Slot.1173148136674.315341270407"
+      },
+      {
+        "variations": [
+          {
+            "type": "PlainText",
+            "value": "was ist die antwort"
+          }
+        ],
+        "id": "Elicit.Slot.1173148136674.329551925808"
+      }
+    ]
+  }
+}
