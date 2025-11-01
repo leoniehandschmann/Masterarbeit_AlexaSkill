@@ -1,7 +1,7 @@
-#Im Namen einer Masterarbeit mit dem Thema: 'Entwicklung und Evaluation eines sprachbasierten Lernsystems' wurde ein prototypischer Alexa Skill entwickelt.
+# Im Namen einer Masterarbeit mit dem Thema: 'Entwicklung und Evaluation eines sprachbasierten Lernsystems' wurde ein prototypischer Alexa Skill entwickelt.
 
 
-###Abstract der Arbeit: 
+### Abstract der Arbeit: 
 Die rasche Verbreitung sprachbasierter Assistenzsysteme (Voice Assistants, VA) wie Amazon
 Alexa hat deren Potenzial für den Bildungsbereich in den Fokus der Forschung gerückt. Allgemein-
 wissen gilt als fundamentale Grundlage für gesellschaftliche Teilhabe und kritische Urteilsfähigkeit.
