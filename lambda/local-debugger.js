@@ -133,3 +133,4 @@ function getArgument(argumentName, defaultValue) {
     }
     return process.argv[index + 1];
 }
+
