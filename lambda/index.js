@@ -1,601 +1,802 @@
+//
+// IMPORT & CONFIG
+//
 const Alexa = require('ask-sdk-core');
-const request = require('sync-request');
-//const { OPENAI_API_KEY } = require('./config.js')
-const OPENAI_API_KEY = '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';
-const { CONTENT } = require('./content')
-const DIFF_ORDER = ['easy', 'medium', 'hard'];
-const THRESHOLD = 3; // 10 richtige pro Stufe
+const { CONTENT } = require('./content');
 
-//const { DynamoDbPersistenceAdapter } = require('ask-sdk-dynamodb-persistence-adapter');
+//config der konstanten Variablen
+const AUTO_LEVEL_UP_THRESHOLD = 5;
+const LEVEL_ORDER = ['leicht', 'mittel', 'schwer'];
+const UX_TEST = true;
 
-//const persistenceAdapter = new DynamoDbPersistenceAdapter({
-  //tableName: 'LernBuddyProgress',
-  //createTable: true
-//});
+// Zuordnung der Stories zu den Allgemeinwissenschaftsthemen
+const TOPIC_TO_STORY_ID = {
+  'geschichte': 'frauenbewegung',
+  'wissenschaft': 'penicillin'
+};
 
-// --- DynamoDB optional laden + Alexa-Hosted sicher nutzen ---
-// --- DynamoDB-Adapter für Alexa-Hosted: nur verwenden, wenn die Hosted-Tabelle vorhanden ist ---
-let DynamoDbPersistenceAdapter;
-try {
-  ({ DynamoDbPersistenceAdapter } = require('ask-sdk-dynamodb-persistence-adapter'));
-  console.log('DDB Adapter geladen');
-} catch (e) {
-  console.log('DDB Adapter NICHT installiert, starte ohne Persistenz');
+
+//
+// FUNKTIONEN 
+//
+
+//Initialisierung der Anwendung --> scores auf 0 setzen,level auf leicht
+function initState(state) {
+  state.score  = state.score  || { geschichte: 0, wissenschaft: 0 };
+  state.levels = state.levels || { geschichte: 'leicht', wissenschaft: 'leicht' };
+  return state;
 }
 
-const hostedTable = process.env.DYNAMODB_TABLE_NAME; // Wird gesetzt, wenn in der Console "Data Storage: DynamoDB" aktiv ist
-let persistenceAdapter = null;
+//Für Ux-Test Wissenschafts Score auf 2 setzen; nur wenn UX_TEST = true
+function uxTestState(state) {
+  initState(state);
+  if (UX_TEST && !state._uxDefaultsApplied) {
+    state.score.wissenschaft = Math.max(Number(state.score.wissenschaft || 0), 2);
+    state._uxDefaultsApplied = true;
+  }
+  return state;
+}
 
-if (DynamoDbPersistenceAdapter && hostedTable) {
-  console.log('Nutze Hosted DDB Table:', hostedTable);
-  // In Alexa-Hosted: KEIN createTable, sonst 403
-  persistenceAdapter = new DynamoDbPersistenceAdapter({
-    tableName: hostedTable,
-    createTable: false
-  });
-} else {
-  console.log('Keine Hosted DDB Table gefunden – starte ohne Persistenz');
+//normalisieren der Nutzereingabe
+
+//alles klein geschrieben + ist String + entfernt Akzente + ß zu ss + cuttet überschüßige Leerzeichen
+function normInputText(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/ß/g, 'ss')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+//normalisiert Nutzereingabe (slot)
+function getSlotLower(h, slotName) {
+  const v2 = Alexa.getSlotValueV2 ? Alexa.getSlotValueV2(h.requestEnvelope, slotName) : null;
+  if (v2 && v2.value && v2.value.name) return normInputText(v2.value.name);
+  const raw = Alexa.getSlotValue(h.requestEnvelope, slotName);
+  return raw ? normInputText(raw) : null;
+}
+
+//erster Buchstabe groß --> gut für Aussprache
+function cap(s) {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
+//backup, damit state vollständig ist und keinen fehler wirft
+function ensureTopicState(s, topic) {
+  s.score  = s.score  || { geschichte: 0, wissenschaft: 0 };
+  s.levels = s.levels || { geschichte: 'leicht', wissenschaft: 'leicht' };
+  if (typeof s.score[topic] !== 'number') s.score[topic] = 0;
+  if (!s.levels[topic]) s.levels[topic] = 'leicht';
+}
+
+//Inhalte aufbereiten,auslesen
+
+//gibt passende Story zurück anhand id (entspricht titel der story)
+function getStoryById(id) {
+  return CONTENT.stories.find(s => s.id === id);
+}
+
+//ermittelt, welche schwierigkeitsstufe als nächstes kommt
+function getNextLevel(level) {
+  const i = LEVEL_ORDER.indexOf(level);
+  if (i < 0 || i === LEVEL_ORDER.length - 1) return null;
+  return LEVEL_ORDER[i + 1];
+}
+
+//speak Output Funktionen
+
+//erzeugt output für jede frage: Frage... Antwort A... Antwort B...
+function buildQuestionSpeech(q) {
+  const parts = q.choices.map((o, i) => 'Antwort ' + String.fromCharCode(65 + i) + ': ' + o).join(', ');
+  return 'Frage: ' + q.question + '. ' + parts;
 }
 
 
-function getQuestionsFor(storyId) {
-  const story = CONTENT.stories.find(s => s.storyId === storyId);
-  if (!story) throw new Error(`Story ${storyId} nicht gefunden`);
-  return { easy: story.quiz.easy, medium: story.quiz.medium, hard: story.quiz.hard };
+//bildet output für story mit sprechpausen und nachfrage nach story 
+function buildStoryOutput(story) {
+  let body = '';
+  if (story.ssml && String(story.ssml).trim()) {
+    body = story.ssml;
+  } else if (Array.isArray(story.story) && story.story.length) {
+    body = story.story
+      .filter(p => typeof p === 'string' && p.trim().length)
+      .join('<break time="500ms"/>');
+  } else if (Array.isArray(story.paragraphs) && story.paragraphs.length) {
+    body = story.paragraphs
+      .filter(p => typeof p === 'string' && p.trim().length)
+      .join('<break time="500ms"/>');
+  } else if (typeof story.text === 'string' && story.text.trim().length) {
+    body = story.text;
+  } else if (typeof story.body === 'string' && story.body.trim().length) {
+    body = story.body;
+  } else {
+    body = 'Ich habe leider keinen Text für diese Story gefunden.';
+  }
+
+  return '<speak>'
+       + body
+       + '<break time="1500ms"/> Hast du noch Fragen? '
+       + 'Ansonsten sag: Starte das Quiz.'
+       + '</speak>';
 }
 
-function defaultProgress(storyId) {
-  return { storyId, correct: { easy: [], medium: [], hard: [] }, currentDifficulty: 'easy' };
+//liest Nutzeraussage nach Slot thema aus
+function getChosenTopic(h) {
+  const lowered = getSlotLower(h, 'thema'); // z. B. "geschichte" | "wissenschaft"
+  return lowered;
 }
 
-function computeCurrentDifficulty(progress) {
-  for (var i = 0; i < DIFF_ORDER.length; i++) {
-    var level = DIFF_ORDER[i];
-    var count = 0;
-    if (progress && progress.correct && progress.correct[level] && Array.isArray(progress.correct[level])) {
-      count = progress.correct[level].length;
+//liest Slot aus
+function getSearchQuery(h, slotName) {
+  const v = Alexa.getSlotValue(h.requestEnvelope, slotName);
+  return (v || '').trim();
+}
+
+//prüft ob Frage nach Definition nach 'Suffragetten' ist
+function isSuffragettes(s) {
+  const x = normInputText(s);
+  return x.includes('suffragett') || x.includes('suffragist') || x.includes('suffrag');
+}
+
+//falls nicht nach suffragetten gefragt wird passiert das
+function handleOtherDefinition(h, termRaw) {
+  return h.responseBuilder
+    .speak('Dazu habe ich noch keine hinterlegte Erklärung. Frag mich gerne nach einem anderen Begriff oder sag: Starte das Quiz.')
+    .reprompt('Möchtest du eine andere Erklärung hören oder mit dem Quiz starten?')
+    .getResponse();
+}
+
+//initialisiert den Quiz State
+function askQuestion(h, preface) {
+  const s    = h.attributesManager.getSessionAttributes();
+  const item = s.currentQuiz && s.currentQuiz[s.quizIndex];
+
+  if (!item) {
+    s.quizIndex = 0;
+    h.attributesManager.setSessionAttributes(s);
+    return h.responseBuilder
+      .speak('Ich musste das Quiz neu initialisieren. Hier kommt die nächste Frage.')
+      .reprompt('Bist du bereit?')
+      .getResponse();
+  }
+
+  const prompt = buildQuestionSpeech(item);
+  s.lastQuestionSpeech = prompt;
+  s.state = 'IN_QUIZ';
+  h.attributesManager.setSessionAttributes(s);
+
+  const speech = preface ? `${preface} ${prompt}` : prompt;
+
+  return h.responseBuilder
+    .speak(speech)
+    .reprompt('Antworte mit Antwort A, B, C oder D')
+    .getResponse();
+}
+
+//indexiert alle möglichen Antwortoptionen und weist ihnen Zahlen zu, dient zur besseren Auswertung
+function parseAnswerIndex(h) {
+  // 1) A/B/C/D im eigenen Slot
+  const opt = getSlotLower(h, 'AntwortOption');
+  if (opt) {
+    if (opt === 'a') return 0;
+    if (opt === 'b') return 1;
+    if (opt === 'c') return 2;
+    if (opt === 'd') return 3;
+  }
+
+  // 2) Zahl 1..4 (AMAZON.NUMBER)
+  const numRaw = Alexa.getSlotValue(h.requestEnvelope, 'Zahl');
+  if (numRaw) {
+    const n = parseInt(numRaw, 10);
+    if (n >= 1 && n <= 4) return n - 1;
+  }
+  const r = h.requestEnvelope.request;
+  if (r && r.intent && r.intent.slots && r.intent.slots.Zahl && r.intent.slots.Zahl.value) {
+    const zw = normInputText(r.intent.slots.Zahl.value);
+    if (zw === 'eins') return 0;
+    if (zw === 'zwei') return 1;
+    if (zw === 'drei') return 2;
+    if (zw === 'vier') return 3;
+  }
+
+  // 3) Freitext AMAZON.SearchQuery
+  const raw = Alexa.getSlotValue(h.requestEnvelope, 'Antwort');
+  if (raw) {
+    const x = normInputText(raw);
+
+    if (x.includes('antwort a') || x === 'a') return 0;
+    if (x.includes('antwort b') || x === 'b') return 1;
+    if (x.includes('antwort c') || x === 'c') return 2;
+    if (x.includes('antwort d') || x === 'd') return 3;
+
+    const s = h.attributesManager.getSessionAttributes() || {};
+    if (s && s.currentQuiz && Number.isInteger(s.quizIndex)) {
+      const item = s.currentQuiz[s.quizIndex];
+      if (item && Array.isArray(item.choices)) {
+        const idx = matchChoiceIndexByText(x, item.choices);
+        if (idx !== null) return idx;
+      }
     }
-    if (count < THRESHOLD) return level;
-  }
-  return 'done';
-}
-
-function pickNextQuestion(progress) {
-  if (!progress || !progress.storyId) {
-    console.log('pickNextQuestion: fehlender progress/storyId');
-    return { status: 'finished' };
   }
 
-  const diff = computeCurrentDifficulty(progress);
-  if (diff === 'done') return { status: 'finished' };
-
-  let buckets;
-  try {
-    buckets = getQuestionsFor(progress.storyId);
-  } catch (e) {
-    console.log('pickNextQuestion/getQuestionsFor error:', e && e.message ? e.message : e);
-    return { status: 'finished' };
-  }
-
-  const all = (buckets && buckets[diff]) ? buckets[diff] : [];
-  if (!Array.isArray(all) || all.length === 0) {
-    const idx = DIFF_ORDER.indexOf(diff);
-    if (idx >= 0 && idx < DIFF_ORDER.length - 1) {
-      progress.currentDifficulty = DIFF_ORDER[idx + 1];
-      return pickNextQuestion(progress);
-    }
-    return { status: 'finished' };
-  }
-
-  const solved = new Set(Array.isArray(progress.correct[diff]) ? progress.correct[diff] : []);
-  const pool = all.filter(q => q && q.id && !solved.has(q.id));
-
-  if (pool.length === 0) {
-    const idx = DIFF_ORDER.indexOf(diff);
-    if (idx >= 0 && idx < DIFF_ORDER.length - 1) {
-      progress.currentDifficulty = DIFF_ORDER[idx + 1];
-      return pickNextQuestion(progress);
-    }
-    return { status: 'finished' };
-  }
-
-  const rand = pool[Math.floor(Math.random() * pool.length)];
-  progress.currentDifficulty = diff;
-  return { status: 'ok', difficulty: diff, question: rand };
-}
-
-
-function isCorrect(userAnswer, question) {
-  const norm = s => String(s).trim().toLowerCase();
-  return norm(userAnswer) === norm(question.answer);
-}
-
-function normalize(v) {
-  if (!v) return null;
-  const t = String(v).toLowerCase();
-  if (t.includes('kurz') || t.includes('10')) return 'kurz';
-  if (t.includes('mittel') || t.includes('20')) return 'mittel';
-  if (t.includes('lang') || t.includes('30')) return 'lang';
   return null;
 }
 
-// Hilfsfunktion lokal definieren
-function getStoryById(id) {
-  return CONTENT.stories.find(s => s.storyId === id) || null;
+//normalisiert antwort damit sie besser als freitext verglichen werden kann
+function normAnswerforComparison(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/ß/g, 'ss')
+    .replace(/[^a-z0-9äöü ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-// optional: nummerierten Story-String in Sätze auftrennen
-function splitNumberedStory(story) {
-  if (!story || typeof story !== 'string') return [];
-  const cleaned = story.replace(/^\s*\d+\s/, '');
-  const parts = cleaned.split(/\s(?=\d+\s)/g).map(p => p.replace(/^\d+\s/, '').trim());
-  return parts.filter(Boolean);
-}
+//vergleicht freitext antwort des nutzers mit den antworten der fragen
+function matchChoiceIndexByText(userRaw, choices) {
+  const u = normAnswerforComparison(userRaw);
+  if (!u) return null;
 
-// Lädt alle gespeicherten Fortschritte (robust, auch ohne Adapter)
-async function loadProgress(h, storyId) {
-  try {
-    const mgr = h.attributesManager;
-    const all = await mgr.getPersistentAttributes() || {};
-    const byStory = all.progressByStory || {};
-    return byStory[storyId] || null;
-  } catch (e) {
-    console.log('loadProgress: keine Persistenz oder Fehler:', e && e.message ? e.message : e);
-    return null;
+  for (let i = 0; i < choices.length; i++) {
+    if (u === normAnswerforComparison(choices[i])) return i;
   }
-}
 
-// Speichert Fortschritt (robust, schluckt Fehler wenn kein Adapter)
-async function saveProgress(h, storyId, progress) {
-  try {
-    const mgr = h.attributesManager;
-    const all = await mgr.getPersistentAttributes() || {};
-    const byStory = all.progressByStory || {};
-    byStory[storyId] = progress;
-    all.progressByStory = byStory;
-    mgr.setPersistentAttributes(all);
-    await mgr.savePersistentAttributes();
-  } catch (e) {
-    console.log('saveProgress: keine Persistenz oder Fehler:', e && e.message ? e.message : e);
+  const hits = [];
+  for (let j = 0; j < choices.length; j++) {
+    const cj = normAnswerforComparison(choices[j]);
+    if (!cj) continue;
+    if (u.indexOf(cj) !== -1 || cj.indexOf(u) !== -1) {
+      hits.push({ idx: j, len: cj.length });
+    }
   }
+  if (hits.length === 1) return hits[0].idx;
+  if (hits.length > 1) {
+    hits.sort((a, b) => b.len - a.len);
+    if (hits[0].len >= (hits[1].len + 3)) return hits[0].idx;
+  }
+  return null;
+}
+
+// startet story, wenn eine mit dem ausgewählten thema vorhanden ist
+function handleStartStory(handlerInput) {
+  const rb    = handlerInput.responseBuilder;
+  const attrs = handlerInput.attributesManager.getSessionAttributes() || {};
+
+  console.log('ATTRS:', JSON.stringify(attrs));
+  console.log('ALL STORY IDS:', (CONTENT.stories || []).map(s => s.id));
+
+  if (attrs.state === 'awaiting_story_confirm' && attrs.pendingStoryId) {
+    const story = getStoryById(attrs.pendingStoryId);
+    if (!story) {
+      attrs.state = 'choosing_topic';
+      attrs.pendingStoryId = null;
+      handlerInput.attributesManager.setSessionAttributes(attrs);
+
+      return rb
+        .speak('Die Story konnte nicht geladen werden. Wähle bitte eins dieser beiden Themen: Geschichte oder Wissenschaft?')
+        .reprompt('Wähle heute zwischen Geschichte oder Wissenschaft.')
+        .addElicitSlotDirective('thema')
+        .getResponse();
+    }
+
+    const ssml = buildStoryOutput(story);
+
+    attrs.state = 'after_story';
+    attrs.lastStoryId = story.id;
+    attrs.pendingStoryId = null;
+    handlerInput.attributesManager.setSessionAttributes(attrs);
+
+    return rb
+      .speak(ssml)
+      .reprompt("Wenn du bereit bist, sag: 'Starte das Quiz'. Oder stell mir eine Frage.")
+      .getResponse();
+  }
+
+  return rb
+    .speak("Wobei soll ich weitermachen? Sag 'Hilfe' oder 'Anleitung' um mehr über die Funktionen zu erfahren")
+    .reprompt('Sag zum Beispiel: Starte Lerneinheit.')
+    .getResponse();
+}
+
+//rechnet gesamten score aus allen themen aus
+function totalScore(s) {
+  s.score = s.score || { geschichte: 0, wissenschaft: 0 };
+  const g = Number(s.score.geschichte || 0);
+  const w = Number(s.score.wissenschaft || 0);
+  return g + w;
+}
+
+//empfehlungen nach gesamt punktezahlen
+function buildSimpleRecommendation(s) {
+  const total = totalScore(s);
+  if (total >= 12) {
+    return 'Stark. Du hast heute richtig viel geschafft. Nimm dir fürs nächste Mal ein neues Thema vor oder setz dir ein Ziel von fünf richtigen Antworten am Stück.';
+  }
+  if (total >= 8) {
+    return 'Sehr gut. Bleib in deinem aktuellen Thema und steigere das Tempo. Wenn du magst, wechsle danach zur Abwechslung das Thema.';
+  }
+  if (total >= 5) {
+    return 'Ich finde, das lief heute sehr gut. Lass uns daran das nächste Mal anknüpfen und genauso weiter machen. ';
+  }
+  if (total >= 3) {
+    return 'Guter Anfang. Wiederhole kurz die Story und mach dann das Quiz auf demselben Level weiter.';
+  }
+  if (total >= 1) {
+    return 'Dranbleiben lohnt sich. Starte beim nächsten Mal direkt mit dem Quiz, damit du in den Flow kommst.';
+  }
+  return 'Lass uns beim nächsten Mal mit einer kurzen Story starten und danach direkt ins Quiz gehen.';
 }
 
 
+//
+// HANDLER
+//
 
+//startet den skill
 const LaunchRequestHandler = {
-    canHandle(handlerInput) {
-        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'LaunchRequest';
-    },
-    handle(handlerInput) {
-        const speakOutput = 'Hallo und Willkommen zu deinem Lern Buddy! Ich möchte dir helfen, dein Allgemeinwissen zu verbessern. Wie lange möchtest du heute Lernen?';
+  canHandle(h) { return Alexa.getRequestType(h.requestEnvelope) === 'LaunchRequest'; },
+  handle(h) {
+    const s = h.attributesManager.getSessionAttributes() || {};
+    initState(s);
+    uxTestState(s);
+    h.attributesManager.setSessionAttributes(s);
 
-        return handlerInput.responseBuilder
-            .speak(speakOutput)
-            .reprompt(speakOutput)
-            .getResponse();
-    }
-};
-
-const ChooseLearnTimeIntentHandler = {
-    canHandle(handlerInput) {
-        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
-            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'ChooseLearnTimeIntent';
-    },
-    handle(handlerInput) {
-        const resBuilder = handlerInput.responseBuilder;
-        const attributes = handlerInput.attributesManager.getSessionAttributes();
-
-    const learnTime_slot = Alexa.getSlot(handlerInput.requestEnvelope, 'learn_time'); //objekt
-    const raw = learnTime_slot && learnTime_slot.value;                             // String
-    const choice = normalize(raw);                                       //kurz,mittel,lang
-    
-
-    if (!choice) {
-      return resBuilder
-        .speak('Wie lange möchtest du lernen. Kurz, mittel oder lang.')
-        .reprompt('Sag kurz, mittel oder lang.')
-        .addElicitSlotDirective('learn_time')
-        .getResponse();
-    }
-
-    // Sessionattribut setzen
-    attributes.learnTime = choice;
-    handlerInput.attributesManager.setSessionAttributes(attributes);
-
-    return resBuilder
-      .speak(`Okay. Für diese Session lernen wir ${choice}. Welches Thema möchtest du heute behandeln?`)
+    const speech = "Willkommen bei LernBuddy. Gemeinsam können wir dein Allgemeinwissen verbessern. Möchtest du loslegen? Dann sag: 'Starte Lerneinheit'" + '<break time="400ms"/> ' + "Soll ich dir erklären, wie alles funktioniert? Dann sag: 'Anleitung'";
+    return h.responseBuilder
+      .speak(speech)
+      .reprompt("Möchtest du loslegen? Dann sag: 'Starte Lerneinheit'. Soll ich dir erklären, wie alles funktioniert? Dann sag: 'Anleitung'")
       .getResponse();
-    }
-}
-
-
-const ChooseTopicIntentHandler = {
-     canHandle(handlerInput) {
-        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
-            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'ChooseTopicIntent';
-    },
-    handle(handlerInput) {
-        const resBuilder = handlerInput.responseBuilder;
-        const attributes = handlerInput.attributesManager.getSessionAttributes();
-
-    const learnTopic_slot = Alexa.getSlot(handlerInput.requestEnvelope, 'learn_topic'); 
-    const raw = learnTopic_slot && learnTopic_slot.value;                            
-    const choice = raw;                                       
-    
-
-    if (!choice) {
-      return resBuilder
-        .speak('Welches Thema möchtest du heute behandeln?')
-        .reprompt('Entscheide dich zwischen Wissenschaft, Politik, Geografie, Sprache, Kunst oder Geschichte')
-        .addElicitSlotDirective('learn_topic')
-        .getResponse();
-    }
-
-    // Sessionattribut setzen
-    attributes.learnTopic = choice;
-    handlerInput.attributesManager.setSessionAttributes(attributes);
-
-    return resBuilder
-      .speak(`Wenn du mit dem Thema ${choice} beginnen möchtest, sag 'Start'.`)
-      .getResponse();
-    }
-}
-
-const GPTIntentHandler = {
-    canHandle(handlerInput) {
-        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
-            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'GPTIntent';
-    },
-    handle(handlerInput) {
-        var speakOutput = 'Hello World!';
-
-        const catchAllValue = handlerInput.requestEnvelope.request.intent.slots.catchAll.value;
-        console.log ('User sagt:', catchAllValue);
-        
-        const apiKey = (process.env.OPENAI_API_KEY || OPENAI_API_KEY || '');
-        const keyInfo = {
-            present: Boolean(apiKey),
-            length: apiKey ? apiKey.length : 0,
-            looksLikeOpenAI: apiKey ? apiKey.startsWith('sk-') : false
-        };
-        console.log('OPENAI key check:', keyInfo);
-        if (!apiKey) {
-        console.error('OPENAI_API_KEY fehlt oder ist leer');
-        return handlerInput.responseBuilder
-            .speak('Der externe Dienst ist gerade nicht erreichbar.')
-            .getResponse();
-        }
-
-        
-        function makeSyncPostRequest(){
-            
-            try{
-                const response = request('POST', 'https://api.openai.com/v1/chat/completions', {
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': 'Bearer ' + OPENAI_API_KEY,
-                        //Add any other headers if needed
-                    },
-                    body: JSON.stringify({
-                        "model": "gpt-5-mini",
-                        "max-tokens": 150,
-                        "messages": [{"role":"system", "content": "antworte kurz,klar und in 2-3 Sätzen"},{"role": "user", "content": catchAllValue}]
-                    })
-                });
-                //check the response status code 
-                if (response.statusCode === 200){
-                    speakOutput = JSON.parse(response.getBody('utf-8'));
-                    speakOutput = speakOutput.choices[0].message.content;
-                    
-                    console.log('response:' , speakOutput);
-                    
-                } else {
-                    console.error('Failed with status code: ', response.statusCode);
-                    const errBody = response.getBody('utf-8');
-                    console.error('OpenAI 429:', errBody);
-                }
-                
-            }
-            catch (error){
-                console.error('Error:',error.message);
-            }
-            
-        }
-        
-        makeSyncPostRequest();
-
-        return handlerInput.responseBuilder
-            .speak(speakOutput)
-            //.reprompt('add a reprompt if you want to keep the session open for the user to respond')
-            .getResponse();
-    }
+  }
 };
 
-const HelpIntentHandler = {
-    canHandle(handlerInput) {
-        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
-            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.HelpIntent';
-    },
-    handle(handlerInput) {
-        const speakOutput = 'You can say hello to me! How can I help?';
-
-        return handlerInput.responseBuilder
-            .speak(speakOutput)
-            .reprompt(speakOutput)
-            .getResponse();
-    }
-};
-
-
-const TellStoryIntentHandler = {
+//startet lerneinheit
+const StartLessonIntentHandler = {
   canHandle(h) {
     return Alexa.getRequestType(h.requestEnvelope) === 'IntentRequest'
-      && Alexa.getIntentName(h.requestEnvelope) === 'TellStoryIntent';
+        && Alexa.getIntentName(h.requestEnvelope) === 'StartLessonIntent';
+  },
+  handle(h) {
+    const speechText = 'Ich schlage dir folgende Themen vor, um dein Allgemeinwissen zu verbessern: Geschichte, Wissenschaft, Politik, Kunst, Geografie, Sprache. Welches Thema möchtest du heute behandeln?';
+    return h.responseBuilder
+      .speak(speechText)
+      .reprompt('Welches Thema wählst du? Wissenschaft, Politik, Geografie, Sprache, Kunst oder Geschichte?')
+      .getResponse();
+  }
+};
+
+//gibt anleitung aus
+const InstructionsIntentHandler = {
+  canHandle(h) {
+    return Alexa.getRequestType(h.requestEnvelope) === 'IntentRequest'
+        && Alexa.getIntentName(h.requestEnvelope) === 'InstructionsIntent';
+  },
+  handle(h) {
+    const speechText = "Wir werden gemeinsam lernen, indem ich dir zu einem allgemeinwissenschaftlichen Thema deiner Wahl eine Geschichte erzähle. Das Ganze basiert auf der Lernmethode Storytelling und soll dir helfen die Inhalte besser zu verinnerlichen. Natürlich hast du die Möglichkeit mich nach weiteren Erklärungen zu fragen. Zum Schluss stelle ich dir ein paar Quizfragen. Soll ich dir noch mehr erklären, dann sag ‘Hilfe’. Möchtest du loslegen? Dann sag: 'Starte Lerneinheit'";
+    return h.responseBuilder
+      .speak(speechText)
+      .reprompt('Willst du wissen, was du zum Beispiel zu mir sagen kannst, dann frag um Hilfe.')
+      .getResponse();
+  }
+};
+
+//handelt die themenauswahl
+const ChooseTopicIntentHandler = {
+  canHandle(h) {
+    return Alexa.getRequestType(h.requestEnvelope) === 'IntentRequest'
+        && Alexa.getIntentName(h.requestEnvelope) === 'ChooseTopicIntent';
   },
   handle(h) {
     const rb = h.responseBuilder;
-    const s = getStoryById('S3');
-    if (!s) return rb.speak('Ich finde die Story nicht.').getResponse();
+    const s  = h.attributesManager.getSessionAttributes() || {};
 
-    const parts = splitNumberedStory(s.story);
-    const storyText = parts.slice(0, 4).join(' '); // z. B. die ersten 4 Sätze
+    const choice = getChosenTopic(h);
+    if (!choice) {
+      const hint = 'Wissenschaft oder Geschichte?';
+      return rb.speak('Welches Thema möchtest du heute behandeln? ' + hint)
+               .reprompt(hint)
+               .addElicitSlotDirective('thema')
+               .getResponse();
+    }
 
-    const ssml = `<speak>${storyText}<break time="2s"/>Sollen wir mit den Fragen beginnen?</speak>`;
+    const storyId = TOPIC_TO_STORY_ID[choice];
+    const story   = storyId ? getStoryById(storyId) : null;
+    if (!story) {
+      const avail = Object.keys(TOPIC_TO_STORY_ID).join(' oder ');
+      return rb.speak('Hierzu gibt es noch keine Story. Verfügbar sind ' + avail + '. Welches Thema möchtest du?')
+               .reprompt('Wähle heute zwischen Geschichte oder Wissenschaft')
+               .addElicitSlotDirective('thema')
+               .getResponse();
+    }
 
-    return rb
-      .speak(ssml)                                 // SSML erlaubt die Pause
-      .reprompt('Sollen wir mit den Fragen beginnen?')
+    s.learnTopic     = choice;
+    s.pendingStoryId = story.id;
+    s.state          = 'awaiting_story_confirm';
+    h.attributesManager.setSessionAttributes(s);
+
+    const title = story.title || 'der nächsten Story';
+    return rb.speak('Du hast dich für das Thema ' + cap(choice) + ' entschieden. Meine erste Story handelt von ' + title + '. Soll ich anfangen?')
+             .reprompt('Soll ich mit der Story anfangen?')
+             .getResponse();
+  }
+};
+
+//beginnt mit der story, wenn nutzer ja sagt
+const YesIntentHandler = {
+  canHandle(h) {
+    const r = h.requestEnvelope.request;
+    return r && r.type === 'IntentRequest' && r.intent && r.intent.name === 'AMAZON.YesIntent';
+  },
+  handle(h) {
+    return handleStartStory(h);
+  }
+};
+
+//beginnt mit der sotry wenn nutzer hinterlegte utterances sagt
+const TellStoryIntentHandler = {
+  canHandle(h) {
+    const r = h.requestEnvelope.request;
+    return r && r.type === 'IntentRequest' && r.intent && r.intent.name === 'TellStoryIntent';
+  },
+  handle(h) {
+    return handleStartStory(h);
+  }
+};
+
+//handelt frage nach Definition
+const AskDefinitionIntentHandler = {
+  canHandle(h) {
+    const r = h.requestEnvelope.request;
+    return r && r.type === 'IntentRequest' && r.intent && r.intent.name === 'AskDefinitionIntent';
+  },
+  handle(h) {
+    const rb = h.responseBuilder;
+    const s  = h.attributesManager.getSessionAttributes() || {};
+    const termRaw = getSearchQuery(h, 'Begriff');
+
+    console.log('AskDefinition termRaw=', termRaw, 'state=', s.state);
+
+    if (!termRaw) {
+      return rb
+        .speak('Welchen Begriff soll ich erklären?')
+        .reprompt('Sag zum Beispiel: Erkläre Suffragetten.')
+        .addElicitSlotDirective('Begriff')
+        .getResponse();
+    }
+
+    if (isSuffragettes(termRaw)) {
+      const explainBody =
+        'Suffragetten waren Aktivistinnen, die zu Beginn des 20. Jahrhunderts vor allem in Großbritannien für das Frauenwahlrecht kämpften. ' +
+        '<break time="400ms"/> ' +
+        'Der Name leitet sich vom englischen Wort <lang xml:lang="en-US">suffrage</lang> für Wahlrecht ab. ' +
+        '<break time="400ms"/> ' +
+        'Sie organisierten Demonstrationen und setzten teilweise zivilen Ungehorsam ein. ' +
+        '<break time="400ms"/> ' +
+        'In Großbritannien durften Frauen ab 1918 eingeschränkt wählen, ab 1928 zu gleichen Bedingungen wie Männer.';
+
+      if (s.state === 'IN_QUIZ' && s.lastQuestionSpeech) {
+        const ssml =
+          '<speak>' + explainBody + ' <break time="600ms"/> ' +
+          'Hier ist wieder deine Frage. ' + s.lastQuestionSpeech + '</speak>';
+        console.log('AskDefinition IN_QUIZ ssml=', ssml);
+        return rb.speak(ssml)
+                 .reprompt('Antworte mit Antwort A, B, C oder D oder sag den Inhalt der Antwort.')
+                 .getResponse();
+      }
+
+      const ssml =
+        '<speak>' + explainBody + ' <break time="600ms"/> ' +
+        'Möchtest du weitermachen? Du kannst das Quiz starten oder ein Thema wechseln.' + '</speak>';
+      console.log('AskDefinition ssml=', ssml);
+      return rb.speak(ssml)
+               .reprompt('Wie möchtest du weitermachen?')
+               .getResponse();
+    }
+
+    return handleOtherDefinition(h, termRaw);
+  }
+};
+
+
+//startet das quiz
+const StartQuizIntentHandler = {
+  canHandle(h) {
+    const r = h.requestEnvelope.request;
+    return r && r.type === 'IntentRequest' && r.intent && r.intent.name === 'StartQuizIntent';
+  },
+  handle(h) {
+    const rb = h.responseBuilder;
+    const s  = h.attributesManager.getSessionAttributes() || {};
+
+    const topic = s.learnTopic || getChosenTopic(h);
+    if (!topic) {
+      return rb.speak('Für welches Thema soll ich das Quiz starten? Wähle Thema Geschichte oder Wissenschaft')
+               .reprompt('Wähle zwischen Geschichte oder Wissenschaft.')
+               .addElicitSlotDirective('thema')
+               .getResponse();
+    }
+
+    ensureTopicState(s, topic);
+    const level = s.levels[topic];
+
+    const story = getStoryById(TOPIC_TO_STORY_ID[topic]);
+    const block = story && story.quiz && story.quiz.levels && story.quiz.levels[level] ? story.quiz.levels[level] : null;
+    if (!block || !block.length) {
+      return rb.speak('Für dieses Thema habe ich keinen Fragenblock. Wähle bitte ein anderes Thema.')
+               .reprompt('Wähle zwischen Geschichte oder Wissenschaft.')
+               .getResponse();
+    }
+
+    s.state         = 'IN_QUIZ';
+    s.currentTopic  = topic;
+    s.currentStoryId= story.id;
+    s.currentLevel  = level;
+    s.currentQuiz   = block;
+    s.quizIndex     = 0;
+    h.attributesManager.setSessionAttributes(s);
+
+    const pre = 'Okay, wir starten das Quiz in ' + cap(topic) + ' auf ' + level + '.';
+    return askQuestion(h, pre);
+  }
+};
+
+//handelt die antworten des nutzers im quiz
+const AnswerIntentHandler = {
+  canHandle(h) {
+    const r = h.requestEnvelope.request;
+    return r && r.type === 'IntentRequest' && r.intent && r.intent.name === 'AnswerIntent';
+  },
+  handle(h) {
+    console.log('SLOTS@AnswerIntent:', JSON.stringify(h.requestEnvelope.request.intent && h.requestEnvelope.request.intent.slots, null, 2));
+
+    const rb = h.responseBuilder;
+    const s  = h.attributesManager.getSessionAttributes() || {};
+
+    if (s.state !== 'IN_QUIZ' || !Array.isArray(s.currentQuiz)) {
+      return rb.speak('Wir sind nicht im Quiz. Sag: Starte das Quiz.')
+               .reprompt('Sag: Starte das Quiz.')
+               .getResponse();
+    }
+
+    if (typeof s.quizIndex !== 'number' || !s.currentQuiz[s.quizIndex]) {
+      s.quizIndex = 0;
+      h.attributesManager.setSessionAttributes(s);
+      return rb.speak('Ich starte die aktuelle Frage neu.').reprompt('Bereit?').getResponse();
+    }
+
+    const topic = s.currentTopic;
+    ensureTopicState(s, topic);
+
+    const item    = s.currentQuiz[s.quizIndex];
+    const userIdx = parseAnswerIndex(h);
+    if (userIdx === null) {
+      return rb.speak('Welche Option wählst du? Antworte mit Antwort A, B, C oder D')
+               .reprompt('Sag zum Beispiel: Antwort A. Oder sag den Inhalt der Antwort')
+               .getResponse();
+    }
+
+    const correctIdx = item.correct_index;
+    const correct    = userIdx === correctIdx;
+
+    let speak;
+    if (correct) {
+      s.score[topic] += 1;
+      speak = 'Sehr gut, das ist richtig. Nächste ';
+
+      const current = s.levels[topic];
+      const next    = getNextLevel(current);
+      if (s.score[topic] >= AUTO_LEVEL_UP_THRESHOLD && next) {
+        s.levels[topic] = next;
+        s.currentLevel  = next;
+        const story     = getStoryById(s.currentStoryId);
+        s.currentQuiz   = story.quiz.levels[next];
+        s.quizIndex     = 0;
+        h.attributesManager.setSessionAttributes(s);
+        return askQuestion(h, speak + 'Dein Schwierigkeitsgrad steigt auf ' + next + '.');
+      }
+    } else {
+      const letter = String.fromCharCode(65 + correctIdx);
+      const text   = item.choices[correctIdx];
+      speak = 'Leider falsch. Die richtige Antwort wäre Antwort ' + letter + ': ' + text + '. Nächste ';
+    }
+
+    if (s.quizIndex < s.currentQuiz.length - 1) s.quizIndex += 1;
+    else s.quizIndex = 0;
+
+    h.attributesManager.setSessionAttributes(s);
+    return askQuestion(h, speak);
+  }
+};
+
+//wiederholen der frage
+const RepeatQuestionIntentHandler = {
+  canHandle(h) {
+    return Alexa.getRequestType(h.requestEnvelope) === 'IntentRequest'
+        && Alexa.getIntentName(h.requestEnvelope) === 'RepeatQuestionIntent';
+  },
+  handle(h) {
+    const s = h.attributesManager.getSessionAttributes() || {};
+
+    if (s.state === 'IN_QUIZ' && s.lastQuestionSpeech) {
+      return h.responseBuilder
+        .speak(s.lastQuestionSpeech)
+        .reprompt('Antworte mit Antwort A, B, C oder D.')
+        .getResponse();
+    }
+
+    return h.responseBuilder
+      .speak('Es gibt gerade keine Frage zu wiederholen. Möchtest du ein Quiz starten?')
+      .reprompt('Sag: Starte das Quiz.')
       .getResponse();
   }
 };
 
-
-
-const AskQuestionsIntentHandler = {
+//punktestand ausgeben
+const GetScoreIntentHandler = {
   canHandle(h) {
-    return Alexa.getRequestType(h.requestEnvelope) === 'IntentRequest'
-        && Alexa.getIntentName(h.requestEnvelope) === 'AskQuestionsIntent';
+    const r = h.requestEnvelope.request;
+    return r && r.type === 'IntentRequest' && r.intent && r.intent.name === 'GetScoreIntent';
   },
-  async handle(h) {
-  const rb = h.responseBuilder;
-  const session = h.attributesManager.getSessionAttributes();
-  const storyId = 'S3';
-
-  try {
-    // Story vorhanden?
-    const storyExists = !!(CONTENT && Array.isArray(CONTENT.stories) && CONTENT.stories.find(s => s.storyId === storyId));
-    if (!storyExists) {
-      console.log('AskQuestions: Story nicht gefunden:', storyId);
-      return rb.speak('Ich finde die Story nicht.').getResponse();
-    }
-
-    // Fortschritt laden oder initialisieren
-    let persisted = await loadProgress(h, storyId);
-    if (!persisted || persisted.storyId !== storyId) {
-      persisted = defaultProgress(storyId);
-      await saveProgress(h, storyId, persisted); // speichere direkt, falls Persistenz aktiv ist
-    }
-    session.progress = persisted;
-
-    // Nächste Frage
-    const res = pickNextQuestion(session.progress);
-    if (!res || res.status === 'finished') {
-      return rb.speak('Diese Story ist abgeschlossen. Willst du eine andere Story wählen?')
-               .reprompt('Andere Story?').getResponse();
-    }
-
-    // Frage merken & sprechen
-    session.currentQuestionId = res.question.id;
-    const q = res.question;
-    const speech = `Kategorie ${res.difficulty}. ${q.question} `
-                 + q.options.map((opt, i) => `Option ${i + 1}: ${opt}.`).join(' ');
-
-    return rb.speak(speech).reprompt('Welche Option wählst du?').getResponse();
-
-  } catch (e) {
-    console.error('AskQuestionsIntentHandler catch:', e && e.stack ? e.stack : e);
-    return rb.speak('Da ist gerade ein Fehler passiert. Sollen wir es noch einmal versuchen?')
-             .reprompt('Soll ich die Fragen stellen?')
-             .getResponse();
-  }
-}
-
-};
-
-const AnswerCheckIntentHandler = {
-  canHandle(h) {
-    return Alexa.getRequestType(h.requestEnvelope) === 'IntentRequest'
-        && Alexa.getIntentName(h.requestEnvelope) === 'AnswerCheckIntent';
-  },
-  async handle(h) {
+  handle(h) {
     const rb = h.responseBuilder;
-    const session = h.attributesManager.getSessionAttributes();
-    const { progress, currentQuestionId } = session || {};
+    const s  = h.attributesManager.getSessionAttributes() || {};
 
-    if (!progress || !currentQuestionId) {
-      return rb.speak('Wir sind gerade in keiner Fragerunde. Soll ich mit den Fragen beginnen?')
-               .reprompt('Soll ich beginnen?').getResponse();
+    s.score  = s.score  || { geschichte: 0, wissenschaft: 0 };
+    s.levels = s.levels || { geschichte: 'leicht', wissenschaft: 'leicht' };
+
+    const topic = getSlotLower(h, 'Thema');
+
+    if (topic && Object.prototype.hasOwnProperty.call(s.score, topic)) {
+      ensureTopicState(s, topic);
+      const pts = s.score[topic];
+      const label = cap(topic);
+      return rb
+        .speak(`Dein Punktestand in ${label} ist ${pts} Punkte.`)
+        .reprompt('Möchtest du weitermachen? Sag: Starte das Quiz.')
+        .getResponse();
     }
 
-    // Aktuelle Frage suchen
-    const qs = getQuestionsFor(progress.storyId);
-    const allQs = [].concat(qs.easy, qs.medium, qs.hard);
-    const question = allQs.find(q => q.id === currentQuestionId);
-    if (!question) {
-      session.progress = defaultProgress(progress.storyId);
-      return rb.speak('Da stimmt etwas mit der aktuellen Frage nicht. Ich starte neu.')
-               .reprompt('Bereit?').getResponse();
-    }
-
-    // Slots robust auslesen
-    const intent = h.requestEnvelope.request.intent || {};
-    const slots  = intent.slots || {};
-    let userAnswer = null;
-
-    if (slots && slots.answerOption && slots.answerOption.value) {
-      const raw = String(slots.answerOption.value).trim();
-      const idx = parseInt(raw, 10) - 1; // Basis 10!
-      if (!isNaN(idx) && question.options && question.options[idx]) {
-        userAnswer = question.options[idx];
-      }
-    }
-    if (!userAnswer && slots && slots.freeAnswer && slots.freeAnswer.value) {
-      userAnswer = String(slots.freeAnswer.value).trim();
-    }
-
-    if (!userAnswer) {
-      return rb.speak('Bitte nenne die Option als Zahl oder sprich die Antwort. Zum Beispiel: Antwort 1 oder Es ist Herbst.')
-               .reprompt('Welche Option wählst du?').getResponse();
-    }
-
-    // Prüfen und Fortschritt aktualisieren
-    const correct = isCorrect(userAnswer, question);
-    if (correct) {
-      const level = session.progress.currentDifficulty;
-      const set = new Set(session.progress.correct[level]);
-      set.add(question.id);
-      session.progress.correct[level] = Array.from(set);
-    }
-
-    // Stufe ggf. wechseln
-    session.progress.currentDifficulty = computeCurrentDifficulty(session.progress);
-
-    // Persistenz (falls aktiv)
-    try {
-      await saveProgress(h, session.progress.storyId, session.progress);
-    } catch (e) {
-      console.log('saveProgress Warnung:', e && e.message ? e.message : e);
-    }
-
-    const feedback = correct ? 'Richtig.' : `Nicht ganz. Richtig wäre: ${question.answer}.`;
-
-    // Nächste Frage ziehen oder sauber beenden
-    const next = pickNextQuestion(session.progress);
-    if (!next || next.status === 'finished') {
-      return rb.speak(`${feedback} Du hast alle Stufen dieser Story abgeschlossen. Willst du eine andere Story wählen?`)
-               .reprompt('Andere Story?').getResponse();
-    }
-
-    session.currentQuestionId = next.question.id;
-    const nq = next.question;
-    const speech = `${feedback} Weiter. Kategorie ${next.difficulty}. ${nq.question} `
-                 + nq.options.map((opt, i) => `Option ${i + 1}: ${opt}.`).join(' ');
-
-    return rb.speak(speech).reprompt('Welche Option wählst du?').getResponse();
+    const a = `Geschichte: ${s.score.geschichte} Punkte`;
+    const b = `Wissenschaft: ${s.score.wissenschaft} Punkte`;
+    return rb
+      .speak(`${a} ${b}`)
+      .reprompt('Möchtest du weitermachen? Dann starte die Lerneinheit oder das Quiz.')
+      .getResponse();
   }
 };
 
+//empfehlungen
+const RecommendationIntentHandler = {
+  canHandle(h) {
+    const r = h.requestEnvelope.request;
+    return r && r.type === 'IntentRequest' && r.intent && r.intent.name === 'RecommendationIntent';
+  },
+  handle(h) {
+    const s = h.attributesManager.getSessionAttributes() || {};
+    s.score  = s.score  || { geschichte: 0, wissenschaft: 0 };
+    s.levels = s.levels || { geschichte: 'leicht', wissenschaft: 'leicht' };
 
-
-const CancelAndStopIntentHandler = {
-    canHandle(handlerInput) {
-        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
-            && (Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.CancelIntent'
-                || Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.StopIntent');
-    },
-    handle(handlerInput) {
-        const speakOutput = 'Goodbye!';
-
-        return handlerInput.responseBuilder
-            .speak(speakOutput)
-            .getResponse();
-    }
+    const rec = buildSimpleRecommendation(s);
+    return h.responseBuilder
+      .speak(`Meine Empfehlung für das nächste Mal: ${rec}`)
+      .reprompt('Wie möchtest du weitermachen? Du kannst das Quiz starten oder ein Thema wechseln.')
+      .getResponse();
+  }
 };
-/* *
- * FallbackIntent triggers when a customer says something that doesn’t map to any intents in your skill
- * It must also be defined in the language model (if the locale supports it)
- * This handler can be safely added but will be ingnored in locales that do not support it yet 
- * */
+
+//schwierigkeitsgrade
+const LevelInfoIntentHandler = {
+  canHandle(h) {
+    return Alexa.getRequestType(h.requestEnvelope) === 'IntentRequest'
+        && Alexa.getIntentName(h.requestEnvelope) === 'LevelInfoIntent';
+  },
+  handle(h) {
+    const rb = h.responseBuilder;
+    const s  = h.attributesManager.getSessionAttributes() || {};
+
+    s.score  = s.score  || { geschichte: 0, wissenschaft: 0 };
+    s.levels = s.levels || { geschichte: 'leicht', wissenschaft: 'leicht' };
+
+    const thr = AUTO_LEVEL_UP_THRESHOLD;
+
+    function line(topicKey) {
+      const lvl   = s.levels[topicKey] || 'leicht';
+      const pts   = Number(s.score[topicKey] || 0);
+      const need  = Math.max(thr - pts, 0);
+      const label = topicKey === 'geschichte' ? 'Geschichte' : 'Wissenschaft';
+      const upInfo = need > 0
+        ? ` Noch ${need} ${need === 1 ? 'Punkt' : 'Punkte'} bis zum automatischen Aufstieg.`
+        : ' Aufstiegsgrenze erreicht oder bereits erhöht.';
+      return `${label}: ${lvl}.${upInfo}`;
+    }
+
+    const speech =
+      `Deine aktuellen Level sind: In ${line('geschichte')} und in ${line('wissenschaft')} ` +
+      `Die Schwierigkeit erhöht sich automatisch, sobald du in einem Thema ${thr} Punkte erreicht hast.`;
+
+    return rb
+      .speak(speech)
+      .reprompt('Wie möchtest du weitermachen? Starte das Quiz oder wechsle das Thema.')
+      .getResponse();
+  }
+};
+
+//beendet die lerneinheit
+const EndLearnSessionIntentHandler = {
+  canHandle(h) {
+    const r = h.requestEnvelope.request;
+    return r && r.type === 'IntentRequest' && r.intent && r.intent.name === 'EndLearnSessionIntent';
+  },
+  handle(h) {
+    const speechText = 'Bis zum nächsten Mal!';
+    return h.responseBuilder
+      .speak(speechText)
+      .withShouldEndSession(true)
+      .getResponse();
+  }
+};
+
+//handelt hilfe anfrage
+const HelpIntentHandler = {
+  canHandle(h) { return Alexa.getRequestType(h.requestEnvelope) === 'IntentRequest' && Alexa.getIntentName(h.requestEnvelope) === 'AMAZON.HelpIntent'; },
+  handle(h) {
+    const speech = `Möchtest du unsere Einheit beginnen, dann sag: ‘Starte Lerneinheit’. Brauchst du eine Erklärung, wie alles funktioniert, dann sag: ‘Anleitung’. Möchtest du deinen Punktestand wissen, dann sag zum Beispiel: ‘Punktestand in Thema Geschichte’. Möchtest du dein Thema wechseln, sag zum Beispiel: ‘Wechsle zum Thema Kunst’.`;
+    return h.responseBuilder.speak(speech).reprompt("Was möchtest du tun?").getResponse();
+  }
+};
+
+//vordefinierte nötige handler
+const ExitIntentHandler = {
+  canHandle(h) {
+    return Alexa.getRequestType(h.requestEnvelope) === 'IntentRequest' &&
+      (Alexa.getIntentName(h.requestEnvelope) === 'AMAZON.CancelIntent' ||
+       Alexa.getIntentName(h.requestEnvelope) === 'AMAZON.StopIntent');
+  },
+  handle(h) { return h.responseBuilder.speak("Bis zum nächsten Mal!").withShouldEndSession(true).getResponse(); }
+};
+
 const FallbackIntentHandler = {
-    canHandle(handlerInput) {
-        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
-            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.FallbackIntent';
-    },
-    handle(handlerInput) {
-        const speakOutput = 'Sorry, I don\'t know about that. Please try again.';
-
-        return handlerInput.responseBuilder
-            .speak(speakOutput)
-            .reprompt(speakOutput)
-            .getResponse();
-    }
+  canHandle(h) { return Alexa.getRequestType(h.requestEnvelope) === 'IntentRequest' && Alexa.getIntentName(h.requestEnvelope) === 'AMAZON.FallbackIntent'; },
+  handle(h) { return h.responseBuilder.speak("Tut mir leid, dass habe ich leider nicht verstanden. Soll ich dir meine Funktionen erklären, dann sag: ‘Hilfe’.").reprompt("Tut mir leid, diese Funktion ist noch nicht möglich.").getResponse(); }
 };
-/* *
- * SessionEndedRequest notifies that a session was ended. This handler will be triggered when a currently open 
- * session is closed for one of the following reasons: 1) The user says "exit" or "quit". 2) The user does not 
- * respond or says something that does not match an intent defined in your voice model. 3) An error occurs 
- * */
+
 const SessionEndedRequestHandler = {
-    canHandle(handlerInput) {
-        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'SessionEndedRequest';
-    },
-    handle(handlerInput) {
-        console.log(`~~~~ Session ended: ${JSON.stringify(handlerInput.requestEnvelope)}`);
-        // Any cleanup logic goes here.
-        return handlerInput.responseBuilder.getResponse(); // notice we send an empty response
-    }
+  canHandle(h) { return Alexa.getRequestType(h.requestEnvelope) === 'SessionEndedRequest'; },
+  handle(h) { return h.responseBuilder.getResponse(); }
 };
-/* *
- * The intent reflector is used for interaction model testing and debugging.
- * It will simply repeat the intent the user said. You can create custom handlers for your intents 
- * by defining them above, then also adding them to the request handler chain below 
- * */
-const IntentReflectorHandler = {
-    canHandle(handlerInput) {
-        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest';
-    },
-    handle(handlerInput) {
-        const intentName = Alexa.getIntentName(handlerInput.requestEnvelope);
-        const speakOutput = `You just triggered ${intentName}`;
 
-        return handlerInput.responseBuilder
-            .speak(speakOutput)
-            //.reprompt('add a reprompt if you want to keep the session open for the user to respond')
-            .getResponse();
-    }
-};
-/**
- * Generic error handling to capture any syntax or routing errors. If you receive an error
- * stating the request handler chain is not found, you have not implemented a handler for
- * the intent being invoked or included it in the skill builder below 
- * */
 const ErrorHandler = {
-    canHandle() {
-        return true;
-    },
-    handle(handlerInput, error) {
-        const speakOutput = 'Sorry, I had trouble doing what you asked. Please try again.';
-        console.log(`~~~~ Error handled: ${JSON.stringify(error)}`);
-
-        return handlerInput.responseBuilder
-            .speak(speakOutput)
-            .reprompt(speakOutput)
-            .getResponse();
-    }
+  canHandle() { return true; },
+  handle(h, err) {
+    console.log(`Error: ${err && err.stack || err}`);
+    return h.responseBuilder.speak("Da ist etwas schiefgelaufen. Bitte sag es nochmal.").reprompt("Bitte wiederhole deine Eingabe.").getResponse();
+  }
 };
 
-
-// --- SkillBuilder robust aufsetzen (custom + optional Persistenz) ---
-let builder = Alexa.SkillBuilders.custom()
+//
+// EXPORT
+//
+exports.handler = Alexa.SkillBuilders.custom()
   .addRequestHandlers(
     LaunchRequestHandler,
-    ChooseLearnTimeIntentHandler,
+    StartLessonIntentHandler,
+    InstructionsIntentHandler,
     ChooseTopicIntentHandler,
     TellStoryIntentHandler,
-    AskQuestionsIntentHandler,
-    AnswerCheckIntentHandler,
-    GPTIntentHandler,
+    YesIntentHandler,
+    AskDefinitionIntentHandler,
+    StartQuizIntentHandler,
+    AnswerIntentHandler,
+    RepeatQuestionIntentHandler,
+    GetScoreIntentHandler,
+    RecommendationIntentHandler,
+    LevelInfoIntentHandler,
+    EndLearnSessionIntentHandler,
     HelpIntentHandler,
-    CancelAndStopIntentHandler,
+    ExitIntentHandler,
     FallbackIntentHandler,
     SessionEndedRequestHandler,
-    IntentReflectorHandler
   )
   .addErrorHandlers(ErrorHandler)
-  .withCustomUserAgent('sample/hello-world/v1.2');
-
-if (persistenceAdapter) {
-  builder = builder.withPersistenceAdapter(persistenceAdapter);
-}
-
-exports.handler = builder.lambda();
+  .lambda();
