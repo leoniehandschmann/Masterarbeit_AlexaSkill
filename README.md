@@ -1,4 +1,5 @@
-# Im Namen einer Masterarbeit mit dem Thema: 'Entwicklung und Evaluation eines sprachbasierten Lernsystems' wurde ein prototypischer Alexa Skill entwickelt.
+# Masterarbeit mit dem Thema: 'Entwicklung und Evaluation eines sprachbasierten Lernsystems' 
+Im Namen einer Masterarbeit mit dem Thema: 'Entwicklung und Evaluation eines sprachbasierten Lernsystems' wurde ein prototypischer Alexa Skill entwickelt.
 
 
 ### Abstract der Arbeit: 
