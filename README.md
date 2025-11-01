@@ -1,6 +1,9 @@
 # Masterarbeit mit dem Thema: 'Entwicklung und Evaluation eines sprachbasierten Lernsystems' 
 Im Namen einer Masterarbeit mit dem Thema: 'Entwicklung und Evaluation eines sprachbasierten Lernsystems' wurde ein prototypischer Alexa Skill entwickelt.
 
+Eine beispielhafte Interaktion mit dem Prototyp ist in diesem Video einzusehen:
+https://www.youtube.com/watch?v=cSjEFeCA64M 
+[]([https://youtu.be/vt5fpE0bzSY](https://www.youtube.com/watch?v=cSjEFeCA64M )
 
 ### Abstract der Arbeit: 
 Die rasche Verbreitung sprachbasierter Assistenzsysteme (Voice Assistants, VA) wie Amazon
