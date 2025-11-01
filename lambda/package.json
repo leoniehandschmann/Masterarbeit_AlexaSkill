@@ -1,17 +1,16 @@
 {
-  "name": "lern-buddy",
-  "version": "1.0.0",
-  "description": "Alexa Skill",
+  "name": "hello-world",
+  "version": "1.2.0",
+  "description": "alexa skill for allgemeinwissen",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"no tests\""
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": "Leonie",
-  "license": "Apache-2.0",
+  "author": "Amazon Alexa",
+  "license": "Apache License",
   "dependencies": {
-    "ask-sdk-core": "^2.12.1",
-    "ask-sdk-model": "^1.55.0",
-    "ask-sdk-dynamodb-persistence-adapter": "^2.12.1",
-    "sync-request": "^6.1.0"
+    "ask-sdk-core": "^2.7.0",
+    "ask-sdk-model": "^1.19.0",
+    "aws-sdk": "^2.326.0"
   }
 }
